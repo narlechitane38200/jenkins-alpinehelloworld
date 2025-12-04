@@ -50,7 +50,7 @@ pipeline {
 
     post {
         always {
-            agent { label 'docker-agent' } // Nettoyage sur un agent capable de docker
+            agent { label 'docker-agent' } // Netoyage sur un agent capable de docker
             echo "Cleaning up container..."
             sh "docker rm -f ${CONTAINER_NAME} || true"
         }
