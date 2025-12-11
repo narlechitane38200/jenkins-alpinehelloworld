@@ -1,64 +1,100 @@
 pipeline {
-    agent none  // Aucun agent global pour le pipeline
-
+    agent none
     environment {
-        IMAGE_NAME = "alpinehelloworld"
-        CONTAINER_NAME = "${IMAGE_NAME}"
-        PORT = "80"
+        DOCKERHUB_AUTH = credentials('narlechitane38200')
+        ID_DOCKER = "${DOCKERHUB_AUTH_USR}"
+        PORT_EXPOSED = "80"
+        IMAGE_NAME = "webapp"
+        IMAGE_TAG = "v1.1"
+        DOCKER_USERNAME = 'narlechitane38200'
     }
-
     stages {
-        stage('Build Docker Image') {
-            agent { label 'docker-agent' } // Agent capable de builder Docker
-            steps {
-                echo "Building Docker image..."
-                sh """
-                docker build -t ${IMAGE_NAME}:latest .
-                """
+      stage ('Build image'){
+          agent any
+          steps {
+            script {
+                sh 'docker build -t ${ID_DOCKER}/${IMAGE_NAME}:${IMAGE_TAG} .'
             }
         }
+      }
+      stage('Run container based on builded image and test') {
+        agent any
+        steps {
+         script {
+           sh '''
+              echo "Clean Environment"
+              docker rm -f $IMAGE_NAME || echo "container does not exist"
+              docker run --name $IMAGE_NAME -d -p ${PORT_EXPOSED}:8080 -e PORT=8080 ${ID_DOCKER}/$IMAGE_NAME:$IMAGE_TAG
+              sleep 5
+              curl http://172.17.0.1:${PORT_EXPOSED} | grep -q "Hello world!"
+           '''
+         }
+        }
+      }
+      stage('Clean Container'){
+          agent any
+          steps {
+              script {
+                  sh '''
+                      docker stop $IMAGE_NAME
+                      docker rm $IMAGE_NAME
+                  '''
+              }
+          }
+      }
+      stage('Login and Push Image on docker hub'){
+          agent any
+          steps {
+              script {
+                  sh '''
+                    docker login -u $DOCKERHUB_AUTH_USR -p $DOCKERHUB_AUTH_PSW
+                    docker push ${ID_DOCKER}/$IMAGE_NAME:$IMAGE_TAG
+                  '''
+              }
+          }
+      }
 
-        stage('Run Docker Container') {
-            agent { label 'docker-agent' } // Même agent ou un autre capable de docker
-            steps {
-                echo "Running container..."
-                sh """
-                # Supprimer le conteneur s'il existe déjà
-                docker rm -f ${CONTAINER_NAME} || true
-                docker run -d --name ${CONTAINER_NAME} -p ${PORT}:5000 ${IMAGE_NAME}:latest
-                """
+      stage('Deploy in staging'){
+          agent any
+            environment {
+                HOSTNAME_DEPLOY_STAGING = "44.222.98.210"
             }
-        }
-
-        stage('Test Container') {
-            agent { label 'docker-agent' } // Peut être un agent différent
-            steps {
-                echo "Testing container with curl..."
-                sh """
-                sleep 5  # Attendre que le conteneur démarre
-                RESPONSE=\$(curl -s http://localhost:${PORT})
-                echo "Response: \$RESPONSE"
-                if [[ "\$RESPONSE" != *"Hello World"* ]]; then
-                    echo "Test failed!"
-                    exit 1
-                fi
-                echo "Test passed!"
-                """
+          steps {
+            sshagent(['SSH_AUTH_SERVER']) {
+                sh '''
+                    ssh -o StrictHostKeyChecking=no -l ubuntu $HOSTNAME_DEPLOY_STAGING "docker rm -f $IMAGE_NAME || echo 'All deleted'"
+                    ssh -o StrictHostKeyChecking=no -l ubuntu $HOSTNAME_DEPLOY_STAGING "docker pull $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG || echo 'Image Download successfully'"
+                    sleep 30
+                    ssh -o StrictHostKeyChecking=no -l ubuntu $HOSTNAME_DEPLOY_STAGING "docker run --rm -dp $PORT_EXPOSED:8080 -e PORT=8080 --name $IMAGE_NAME $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG"
+                    sleep 5
+                    curl -I http://$HOSTNAME_DEPLOY_STAGING:$PORT_EXPOSED
+                '''
             }
-        }
-    }
-
-    post {
-        always {
-            agent { label 'docker-agent' } // Netoyage sur un agent capable de docker
-            echo "Cleaning up container..."
-            sh "docker rm -f ${CONTAINER_NAME} || true"
-        }
-        success {
-            echo "Pipeline completed successfully!"
-        }
-        failure {
-            echo "Pipeline failed!"
-        }
+          }
+      }
+      stage('Deploy in prod'){
+          agent any
+            environment {
+                HOSTNAME_DEPLOY_PROD = "3.238.29.141"
+            }
+          steps {
+            sshagent(credentials: ['SSH_AUTH_SERVER']) {
+                sh '''
+                    [ -d ~/.ssh ] || mkdir ~/.ssh && chmod 0700 ~/.ssh
+                    ssh-keyscan -t rsa,dsa ${HOSTNAME_DEPLOY_PROD} >> ~/.ssh/known_hosts
+                    command1="docker login -u $DOCKERHUB_AUTH_USR -p $DOCKERHUB_AUTH_PSW"
+                    command2="docker pull $DOCKERHUB_AUTH_USR/$IMAGE_NAME:$IMAGE_TAG"
+                    command3="docker rm -f webapp || echo 'app does not exist'"
+                    command4="docker run -d -p 80:8080 -e PORT=8080 --name webapp $DOCKERHUB_AUTH_USR/$IMAGE_NAME:$IMAGE_TAG"
+                    ssh -o StrictHostKeyChecking=no ubuntu@${HOSTNAME_DEPLOY_PROD} \
+                        -o SendEnv=IMAGE_NAME \
+                        -o SendEnv=IMAGE_TAG \
+                        -o SendEnv=DOCKERHUB_AUTH_USR \
+                        -o SendEnv=DOCKERHUB_AUTH_PSW \
+                        -C "$command1 && $command2 && $command3 && $command4"
+                '''
+            }
+          }
+      }        
     }
 }
